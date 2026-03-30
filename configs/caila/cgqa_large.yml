@@ -8,11 +8,11 @@ model_params:
   model: CAILA
   train_only: true
   mixup_ratio: 0.00
-  concept_shift_prob: 0.1
+  concept_shift_prob: 0.0
   img_dropout: 0.5
   fusion_start_layer: 12
 training:
-  batch_size: 16
+  batch_size: 4
   eval_val_every: 1
   load: 
   lr: 1.0e-05

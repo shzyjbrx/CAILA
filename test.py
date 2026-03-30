@@ -5,6 +5,10 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 from flags import DATA_FOLDER
 
+import transformers
+# 将 Hugging Face 的日志级别设置为 ERROR，屏蔽掉普通的 WARNING 和 INFO
+transformers.logging.set_verbosity_error()
+
 cudnn.benchmark = True
 
 # Python imports
@@ -70,8 +74,30 @@ def main():
 
     evaluator = Evaluator(testset, model)
 
+    # 循环遍历两个权重文件
+    checkpoints_to_test = ['ckpt_best_hm.t7', 'ckpt_best_auc.t7']
+
     with torch.no_grad():
-        test(model, testloader, evaluator, args)
+        for ckpt_name in checkpoints_to_test:
+            ckpt_path = ospj(logpath, ckpt_name)
+            
+            if os.path.exists(ckpt_path):
+                print("\n" + "="*50)
+                print(f"🚀 正在加载并测试模型: {ckpt_name}")
+                print("="*50)
+                
+                checkpoint = torch.load(ckpt_path)
+                
+                state_dict = checkpoint['net']
+                if list(state_dict.keys())[0].startswith('module.'):
+                    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                    
+                model.load_state_dict(state_dict, strict=True)
+                model.eval()
+                
+                test(model, testloader, evaluator, args)
+            else:
+                print(f"\n[Warning] 找不到权重文件: {ckpt_path}")
 
 
 def test(model, testloader, evaluator,  args, threshold=None, print_results=True):

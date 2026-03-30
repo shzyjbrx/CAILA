@@ -12,7 +12,7 @@ model_params:
   img_dropout: 0.1
   fusion_start_layer: 12
 training:
-  batch_size: 32
+  batch_size: 16
   eval_val_every: 1
   load: 
   lr: 2.0e-05

@@ -523,7 +523,8 @@ class CLIPEncoderLayer(nn.Module):
                         up_latent=[up_latent_obj, up_latent_attr]
                     ) + hidden_states
             else:
-                hidden_states = self.adapter1[mode](hidden_states)[-1] + hidden_states
+                if mode in self.adapter1:
+                    hidden_states = self.adapter1[mode](hidden_states)[-1] + hidden_states
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -540,7 +541,8 @@ class CLIPEncoderLayer(nn.Module):
                         up_latent=[up_latent_obj, up_latent_attr]
                     ) + hidden_states 
             else:
-                hidden_states = self.adapter2[mode](hidden_states)[-1] + hidden_states
+                if mode in self.adapter2:
+                    hidden_states = self.adapter2[mode](hidden_states)[-1] + hidden_states
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)

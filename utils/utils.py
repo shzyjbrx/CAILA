@@ -71,11 +71,22 @@ class UnNormalizer:
         return (tensor * self.std) + self.mean
 
 def load_args(filename, args):
+    import sys
     with open(filename, 'r') as stream:
         data_loaded = yaml.safe_load(stream)
-    for key, group in data_loaded.items():
+        
+    # 💡 提取在命令行中显式传入的参数名
+    cli_args = []
+    for arg in sys.argv:
+        if arg.startswith('--'):
+            # 处理 '--batch_size' 或 '--batch_size=128' 两种输入格式
+            cli_args.append(arg.lstrip('-').split('=')[0])
+
+    for group_name, group in data_loaded.items():
         for key, val in group.items():
-            setattr(args, key, val)
+            # 💡 核心逻辑：如果该参数没有在命令行中被指定，才使用 yml 里的值
+            if key not in cli_args:
+                setattr(args, key, val)
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a

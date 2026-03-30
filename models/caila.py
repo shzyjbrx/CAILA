@@ -126,6 +126,23 @@ class CAILA(nn.Module):
         config = CLIPConfig.from_pretrained("openai/{}".format(args.clip_config))
         config.text_config.reduction_factor = args.reduction_factor
         config.vision_config.reduction_factor = args.reduction_factor 
+
+        # 文本端配置：保留 pair(组合), obj(物体), attr(属性) 的 prompt 处理
+        config.text_config.track_z = False
+        config.text_config.adapter_modes = ['pair', 'obj', 'attr']
+        config.text_config.has_adapter = args.enable_text_adapter
+        config.text_config.mixture_of_adapters = False
+
+        # 视觉端配置：【核心修改】严格定义双分支，并关闭 MoA 混合机制
+        config.vision_config.adapter_modes = ['obj', 'attr'] # 显式解耦为两个分支
+        config.vision_config.track_z = False
+        config.vision_config.mixture_of_adapters = False     # 关闭特征混合，保持彻底的解耦
+        config.vision_config.has_adapter = True              # 强制开启视觉 Adapter
+        
+        # 控制 Adapter 插入的层数 (对应论文消融实验)
+        # ViT-L/14 共24层 (索引为0-23)
+        config.vision_config.adapter_start_layer = args.adapter_start_layer 
+        config.vision_config.adapter_end_layer = 23          # 固定到最后一层
         
         config.text_config.track_z = False
         config.text_config.adapter_modes= ['pair', 'obj','attr']
@@ -195,177 +212,75 @@ class CAILA(nn.Module):
 
     def run(self, x):
         img = x[0]
-
         device = img.device
 
-        pos_attr_feats, attr_vision_outputs = self.clip_model.get_image_features(
-            img, 
-            mode='attr', 
-            output_hidden_states=True,
-            output_pre_adapter_hidden_states=True,
-        )
-        pos_obj_feats, obj_vision_outputs = self.clip_model.get_image_features(
-            img, 
-            mode='obj',
-            output_hidden_states=True,
-            output_pre_adapter_hidden_states=True,
-        )
+        # ==================== 1. 视觉特征提取 (三分支) ====================
+        # 1.1 属性和物体分支：使用 Adapter 解耦提取 (h_A, h_O)
+        attr_img_feats, _ = self.clip_model.get_image_features(img, mode='attr', output_hidden_states=False)
+        obj_img_feats, _ = self.clip_model.get_image_features(img, mode='obj', output_hidden_states=False)
+        
+        # 1.2 组合分支：因为 vision_config.adapter_modes 只有 attr 和 obj，
+        # 当我们传入 mode='pair' 时，模型会绕过 Adapter，直接提取原始的全局 CLIP 视觉特征
+        pair_img_feats, _ = self.clip_model.get_image_features(img, mode='pair', output_hidden_states=False)
 
-        attr_adapter_feats, attr_hidden_states = attr_vision_outputs.pre_adapter_hidden_states, attr_vision_outputs.hidden_states
-        obj_adapter_feats, obj_hidden_states = obj_vision_outputs.pre_adapter_hidden_states, obj_vision_outputs.hidden_states
+        # L2 归一化及 Dropout
+        attr_img_feats = self.dropout(F.normalize(attr_img_feats, dim=-1, p=2))
+        obj_img_feats = self.dropout(F.normalize(obj_img_feats, dim=-1, p=2))
+        pair_img_feats = self.dropout(F.normalize(pair_img_feats, dim=-1, p=2))
 
-        attr_embeds = self.clip_model.get_text_features(
-            **self.attr_inputs.to(device), 
-            prompt_loc=self.prompt_loc,
-            mode='attr')
-
-        obj_embeds = self.clip_model.get_text_features(
-            **self.obj_inputs.to(device), 
-            prompt_loc=self.prompt_loc,
-            mode='obj'
-        )
-
+        # ==================== 2. 文本特征提取 ====================
+        attr_text_embeds = self.clip_model.get_text_features(**self.attr_inputs.to(device), prompt_loc=self.prompt_loc, mode='attr')
+        obj_text_embeds = self.clip_model.get_text_features(**self.obj_inputs.to(device), prompt_loc=self.prompt_loc, mode='obj')
+        
         if self.training:
-            attrs, objs, pairs = x[1], x[2], x[3]
-            mixup_attrs, mixup_objs, mixup_pairs, do_mixup, mixup_prob = x[4], x[5], x[6], x[7], x[8]
-            new_objs, new_attrs, new_pairs, new_sample, do_obj_shift, do_attr_shift = x[9], x[10], x[11], x[12], x[13], x[14]
-
-            # Perform attr shift 
-            indices = do_attr_shift.nonzero().squeeze(-1)
-            new_attr_sample = new_sample[indices]
-
-            if len(indices) > 0:
-                shifted_attr_adapter_feats = [[x[0].clone(), x[1].clone()] for x in attr_adapter_feats]
-                shifted_attr_hidden_states = [x.clone() for x in attr_hidden_states]
-                target_attr_feats, target_attr_vision_outputs = self.clip_model.get_image_features(
-                    new_attr_sample,
-                    mode='attr',
-                    output_pre_adapter_hidden_states=True,
-                    output_hidden_states=True
-                )
-                target_attr_adapter_feats, target_attr_hidden_states = target_attr_vision_outputs.pre_adapter_hidden_states, target_attr_vision_outputs.hidden_states
-                for layer, feat in enumerate(target_attr_adapter_feats):
-                    shifted_attr_adapter_feats[layer][0][indices] = feat[0]
-                    shifted_attr_adapter_feats[layer][1][indices] = feat[1]
-                    shifted_attr_hidden_states[layer][indices] = target_attr_hidden_states[layer]
-                
-                pos_attr_feats[indices] = target_attr_feats
-                attrs[indices] = new_attrs[indices]
-                pairs[indices] = new_pairs[indices]
-            else:
-                shifted_attr_adapter_feats = attr_adapter_feats
-                shifted_attr_hidden_states = attr_hidden_states
-
-            # Perform obj shift
-            indices = do_obj_shift.nonzero().squeeze(-1)
-            new_obj_sample = new_sample[indices]
-
-            if len(indices) > 0:
-                shifted_obj_adapter_feats = [[x[0].clone(), x[1].clone()] for x in obj_adapter_feats]
-                shifted_obj_hidden_states = [x.clone() for x in obj_hidden_states]
-                target_obj_feats, target_obj_vision_outputs = self.clip_model.get_image_features(
-                    new_obj_sample,
-                    mode='obj',
-                    output_pre_adapter_hidden_states=True,
-                    output_hidden_states=True
-                )
-                target_obj_adapter_feats, target_obj_hidden_states = target_obj_vision_outputs.pre_adapter_hidden_states, target_obj_vision_outputs.hidden_states
-                for layer, feat in enumerate(target_obj_adapter_feats):
-                    shifted_obj_adapter_feats[layer][0][indices] = feat[0]
-                    shifted_obj_adapter_feats[layer][1][indices] = feat[1]
-                    shifted_obj_hidden_states[layer][indices] = target_obj_hidden_states[layer]
-                
-                pos_obj_feats[indices] = target_obj_feats
-                objs[indices] = new_objs[indices]
-                pairs[indices] = new_pairs[indices]
-            else:
-                shifted_obj_adapter_feats = obj_adapter_feats
-                shifted_obj_hidden_states = obj_hidden_states
-
-            do_mixup = do_mixup.long()
-      
+            # 训练阶段：仅提取当前 batch 涉及到的 pair 文本特征
             train_pair_inputs = {k: v[self.train_idx.cpu()].to(device) for k,v in self.pair_inputs.items()}
-
-            pair_embeds = self.clip_model.get_text_features(
-                **train_pair_inputs,
-                prompt_loc=self.prompt_loc,
-                mode='pair'
-            )
-
-            num_train_pairs = len(self.all_train_attrs)           
-            pairwise_attr_embeds = attr_embeds[self.all_train_attrs]
-            pairwise_obj_embeds = obj_embeds[self.all_train_objs]
+            pair_text_embeds = self.clip_model.get_text_features(**train_pair_inputs, prompt_loc=self.prompt_loc, mode='pair')
         else:
-            shifted_attr_feats = None
-            if self.saved_pair_embeds is not None:
-                pair_embeds = self.saved_pair_embeds
-            else:
-                num_pairs = len(self.all_attrs)
-                if num_pairs > 25000:
-                    embeds = []
-                    for start in range(0, num_pairs, 25000):
-                        end = min(start + 25000, num_pairs)
-                        pair_inputs = {k: v[start:end].to(device) for k,v in self.pair_inputs.items()}
-                        pair_embeds = self.clip_model.get_text_features(
-                            **pair_inputs,
-                            mode='pair'
-                        )
-                        embeds.append(pair_embeds) 
-                    pair_embeds = torch.cat(embeds, dim=0)
-                else:
-                    pair_embeds = self.clip_model.get_text_features(
-                        **self.pair_inputs.to(device),
-                        mode='pair'
-                    )
-                self.saved_pair_embeds = pair_embeds
-            pairwise_attr_embeds = attr_embeds[self.all_attrs]
-            pairwise_obj_embeds = obj_embeds[self.all_objs]
+            # 推理阶段：提取所有的 pair 候选文本特征
+            pair_text_embeds = self.clip_model.get_text_features(**self.pair_inputs.to(device), prompt_loc=self.prompt_loc, mode='pair')
 
-        if self.training:
-            img_feats = self.clip_model.get_image_features(
-                inputs_embeds=torch.cat([shifted_attr_hidden_states[self.fusion_start_layer], shifted_obj_hidden_states[self.fusion_start_layer]], dim=1),
-                mode='mixture',
-                concept_hidden_states=[[a, o] for a, o in zip(shifted_attr_adapter_feats, shifted_obj_adapter_feats)],
-                another_cls=attr_hidden_states[self.fusion_start_layer].shape[1]
-            )[0]
-        else:
-            img_feats = self.clip_model.get_image_features(
-                inputs_embeds=torch.cat([attr_hidden_states[self.fusion_start_layer], obj_hidden_states[self.fusion_start_layer]], dim=1),
-                mode='mixture',
-                concept_hidden_states=[[a, o] for a, o in zip(attr_adapter_feats, obj_adapter_feats)],
-                another_cls=attr_hidden_states[self.fusion_start_layer].shape[1]
-            )[0]
+        attr_text_embeds = F.normalize(attr_text_embeds, dim=-1, p=2).permute(1, 0)
+        obj_text_embeds = F.normalize(obj_text_embeds, dim=-1, p=2).permute(1, 0)
+        pair_text_embeds = F.normalize(pair_text_embeds, dim=-1, p=2).permute(1, 0)
 
-        img_feats = F.normalize(img_feats, dim=-1, p=2)
-        img_feats = self.dropout(img_feats)
-        pos_obj_feats = F.normalize(pos_obj_feats, dim=-1, p=2)
-        pos_attr_feats = F.normalize(pos_attr_feats, dim=-1, p=2)
-
-        pair_embeds = self.apply_gating_fn(pair_embeds, pairwise_attr_embeds, pairwise_obj_embeds)
-        pair_logit_scale = self.clip_model.logit_scale.exp()
-        obj_logit_scale = self.obj_logit_scale.exp()
+        # ==================== 3. 计算对齐 Logits ====================
         attr_logit_scale = self.attr_logit_scale.exp()
+        obj_logit_scale = self.obj_logit_scale.exp()
+        pair_logit_scale = self.clip_model.logit_scale.exp() # 组合分支使用原始温度
 
-        pair_embeds = F.normalize(pair_embeds, dim=-1, p=2)
+        attr_logits = torch.matmul(attr_img_feats, attr_text_embeds) * attr_logit_scale
+        obj_logits = torch.matmul(obj_img_feats, obj_text_embeds) * obj_logit_scale
+        pair_logits = torch.matmul(pair_img_feats, pair_text_embeds) * pair_logit_scale
 
-
+        # ==================== 4. 训练与推理逻辑 ====================
         if self.training:
-            pair_embeds = pair_embeds.permute(1, 0)
-            pair_pred = torch.matmul(img_feats, pair_embeds) * pair_logit_scale
+            # 解析 Ground Truth，x[3] 是组合 (pair) 的标签
+            attrs, objs, pairs = x[1].to(device), x[2].to(device), x[3].to(device)
 
-            obj_embeds = F.normalize(obj_embeds, dim=-1, p=2).permute(1, 0)
-            attr_embeds = F.normalize(attr_embeds, dim=-1, p=2).permute(1, 0)
+            # 三分支的独立分类损失
+            loss_attr = F.cross_entropy(attr_logits, attrs)
+            loss_obj = F.cross_entropy(obj_logits, objs)
+            loss_pair = F.cross_entropy(pair_logits, pairs)
+            
+            # 💡 注意：您后续的“双向条件依赖约束损失”加在这里
+            # loss_constraint = ...
+            
+            total_loss = loss_attr + loss_obj + loss_pair
+            return total_loss, None
 
-            obj_pred = torch.matmul(pos_obj_feats, obj_embeds) * obj_logit_scale
-            attr_pred = torch.matmul(pos_attr_feats, attr_embeds) * attr_logit_scale
-
-            loss = self.mixup_loss(pair_pred, pairs, mixup_pairs, do_mixup, mixup_prob) + \
-                1 * self.mixup_loss(obj_pred, objs, mixup_objs, do_mixup, mixup_prob) + \
-                1 * self.mixup_loss(attr_pred, attrs, mixup_attrs, do_mixup, mixup_prob) 
-
-            return loss, None
         else:
-            pair_embeds = pair_embeds.permute(1, 0)
-            score = torch.matmul(img_feats, pair_embeds) 
-            return score.cpu()
-       
+            # 推理阶段：将三个分支的预测分数进行融合
+            # 【修复】：使用 __init__ 中已经构建好的 all_attrs 和 all_objs 列表
+            pair_attr_indices = torch.tensor(self.all_attrs, device=device)
+            pair_obj_indices = torch.tensor(self.all_objs, device=device)
+            
+            # 分别提取对应的属性得分和物体得分
+            scores_a = attr_logits[:, pair_attr_indices] 
+            scores_o = obj_logits[:, pair_obj_indices]   
+            scores_p = pair_logits 
+            
+            # 三分支得分融合 (相加)
+            pair_scores = scores_a + scores_o + scores_p
+            
+            return pair_scores.cpu()

@@ -1,7 +1,10 @@
+logs/
+clip_ckpts/
+wandb/
+all_data/
+__pycache__/
+*.t7
+*.pth
+*.out
+.ipynb_checkpoints/
 all_data
-clip_ckpts
-release_ckpts
-logs
-
-*.pyc
-wandb
