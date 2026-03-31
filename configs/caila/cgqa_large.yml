@@ -22,7 +22,7 @@ training:
   max_epochs: 20
   norm_family: clip
   save_every: 10000
-  test_batch_size: 32
+  test_batch_size: 8
   test_set: val
   topk: 1
   workers: 8

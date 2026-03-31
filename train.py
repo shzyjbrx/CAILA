@@ -342,8 +342,11 @@ def test(epoch, model, testloader, evaluator, writer, args, logpath, device):
     result = ''
     # write to Tensorboard
     for key in stats:
-        writer.add_scalar(key, stats[key], epoch)
-        wandb.log({'Val/{}'.format(key): stats[key]}, step=epoch)
+        # 💡 新增：判断 epoch 是否为整数。最后的终极评测是字符串，就不往曲线图里画了
+        if isinstance(epoch, int):
+            writer.add_scalar(key, stats[key], epoch)
+            wandb.log({'Val/{}'.format(key): stats[key]}, step=epoch)
+            
         result = result + key + '  ' + str(round(stats[key], 4)) + '| '
 
     result = result + args.name

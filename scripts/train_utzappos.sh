@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=p2-zappos
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu_mem
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16

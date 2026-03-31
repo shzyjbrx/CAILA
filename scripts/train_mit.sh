@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=p2-mit
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu_mem
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -28,7 +28,7 @@ DATA_ROOT="/home/bingxing2/home/scx6d4e/run/xuanzhenzhen/Base/data"
 CONFIG="configs/caila/mit_large.yml"
 
 # 如果使用单卡，N_GPU 设为 1；当前申请了 4 卡，保持 4
-N_GPU=2
+N_GPU=4
 
 # 层级消融实验参数 (对应 ViT-L/14 的 24 层)
 # 23 = 仅最后1层

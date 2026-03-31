@@ -237,8 +237,30 @@ class CAILA(nn.Module):
             train_pair_inputs = {k: v[self.train_idx.cpu()].to(device) for k,v in self.pair_inputs.items()}
             pair_text_embeds = self.clip_model.get_text_features(**train_pair_inputs, prompt_loc=self.prompt_loc, mode='pair')
         else:
-            # 推理阶段：提取所有的 pair 候选文本特征
-            pair_text_embeds = self.clip_model.get_text_features(**self.pair_inputs.to(device), prompt_loc=self.prompt_loc, mode='pair')
+            # 推理阶段：提取所有的 pair 候选文本特征，并使用缓存加速
+            # 💡 修复 C-GQA 开放世界 OOM，并加入 Cache 机制提速
+            if not hasattr(self, '_cached_pair_text_embeds') or self._cached_pair_text_embeds is None:
+                with torch.no_grad(): # 确保评估时绝不计算梯度
+                    chunk_size = 512
+                    all_pair_embeds = []
+                    input_ids = self.pair_inputs['input_ids']
+                    attention_mask = self.pair_inputs['attention_mask']
+                    num_pairs = input_ids.shape[0]
+
+                    for i in range(0, num_pairs, chunk_size):
+                        chunk_inputs = {
+                            'input_ids': input_ids[i:i+chunk_size].to(device),
+                            'attention_mask': attention_mask[i:i+chunk_size].to(device)
+                        }
+                        # 提取当前块的文本特征
+                        chunk_embeds = self.clip_model.get_text_features(**chunk_inputs, prompt_loc=self.prompt_loc, mode='pair')
+                        all_pair_embeds.append(chunk_embeds)
+                        
+                    # 把所有块拼装起来，存入缓存
+                    self._cached_pair_text_embeds = torch.cat(all_pair_embeds, dim=0)
+            
+            # 直接使用缓存的特征
+            pair_text_embeds = self._cached_pair_text_embeds
 
         attr_text_embeds = F.normalize(attr_text_embeds, dim=-1, p=2).permute(1, 0)
         obj_text_embeds = F.normalize(obj_text_embeds, dim=-1, p=2).permute(1, 0)
