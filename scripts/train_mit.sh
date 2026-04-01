@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=24:00:00
 # 1. 修改日志输出路径，归类到 mit 文件夹下
-#SBATCH --output=logs/point2/mit/train/p2-%j.out
-#SBATCH --error=logs/point2/mit/train/p2-%j.err
+#SBATCH --output=logs/point2/mit/train/p2-s0e5-%j.out
+#SBATCH --error=logs/point2/mit/train/p2-s0e5-%j.err
 
 module purge
 module load compilers/gcc/9.3.0
@@ -17,6 +17,10 @@ source activate /home/bingxing2/home/scx6d4e/run/xuanzhenzhen/Base/miniconda3/en
 
 export HF_ENDPOINT=https://hf-mirror.com
 export TOKENIZERS_PARALLELISM=false
+# 💡 强制设置终端为 UTF-8 编码，彻底消灭中文和 Emoji 乱码
+export PYTHONIOENCODING=utf-8
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
 
 # --- 1. 数据集软链接配置 ---
 DATA_ROOT="/home/bingxing2/home/scx6d4e/run/xuanzhenzhen/Base/data"
@@ -36,6 +40,7 @@ N_GPU=4
 # 12 = 中深层 (最后12层)
 # 0  = 全层 (全部24层)
 ADAPTER_START_LAYER=0
+ADAPTER_END_LAYER=5
 BATCH_SIZE=16
 
 echo ">>> Start Training Dual-Branch Baseline | Dataset: MIT-States | Config: ${CONFIG} | Start Layer: ${ADAPTER_START_LAYER} <<<"
@@ -46,4 +51,5 @@ export OMP_NUM_THREADS=1
 python -m torch.distributed.run --nproc_per_node=${N_GPU} train.py \
     --config ${CONFIG} \
     --adapter_start_layer ${ADAPTER_START_LAYER} \
+    --adapter_end_layer ${ADAPTER_END_LAYER} \
     --batch_size ${BATCH_SIZE}

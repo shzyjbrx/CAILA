@@ -30,6 +30,12 @@ from utils.utils import init_distributed_mode, is_main_process
 from datetime import datetime
 
 import wandb
+import sys
+import io
+
+# 💡 强行重定向标准输出，解决终端乱码
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 best_auc = 0
 best_hm = 0
@@ -66,7 +72,8 @@ def main():
             f"单卡BS_{args.batch_size}",   # 单卡 Batch Size
             f"卡数_{num_gpus}",            # 自动记录使用了几张显卡
             f"总BS_{total_bs}",            # 自动计算并记录真实生效的总 Batch Size
-            "三分支基线"                   # 实验性质标签
+            "三分支基线",                    # 实验性质标签
+            f"层数_{args.adapter_start_layer}至{args.adapter_end_layer}"
         ]
 
         # 2. 初始化 wandb，使用自定义名称，并记录全部参数
@@ -160,7 +167,8 @@ def main():
     # 💡 核心：训练循环与早停判断
     for epoch in tqdm(range(start_epoch, args.max_epochs + 1), desc='Current epoch', disable=not is_main_process(), ncols=100, ascii=True):
         
-        trainloader.dataset.set_p(args.mixup_ratio, args.concept_shift_prob, args.obj_shift_ratio)
+        # 💡 在传参给 Worker 进程之前，先显式地强制转换成浮点数
+        trainloader.dataset.set_p(float(args.mixup_ratio), float(args.concept_shift_prob), float(args.obj_shift_ratio))
         if args.distributed:
             trainloader.sampler.set_epoch(epoch)
         
@@ -195,18 +203,33 @@ def main():
                 print(f"\n🛑 触发早停！已连续 {patience} 轮无提升。结束训练，进入最终测试...")
             break
             
-        dist.barrier()  
+        if args.distributed:
+            dist.barrier()  
 
-    # ================= 💡 终极更新：在真实测试集上分别评估 Best HM 和 Best AUC 模型 =================
-    if is_main_process():
+    # =========================================================================================
+    # 💡 核心修复：训练彻底结束，准备进入单卡最终测试
+    # =========================================================================================
+    
+    # 1. 设置最终集合点：确保所有显卡都已经跳出了上面的 for 循环 (正常结束或被早停截断)
+    if args.distributed:
+        dist.barrier()
+        print(f"Rank {rank} 已到达最终集合点。准备销毁进程组...")
+        
+        # 2. 销毁分布式环境：必须在所有卡到达集合点后才能销毁，否则未到达的卡会报错
+        dist.destroy_process_group()
+
+    # 3. 只有主进程 (Rank 0) 会继续往下执行，此时已经退化为普通的单进程模式
+    if is_main_process() or not args.distributed: # 如果不是分布式，也继续执行
         print("\n" + "🌟"*30)
         print("🚀 训练阶段完全结束！开始在【真实测试集(Test Set)】上进行最终评测...")
-        print("🌟"*30)
+        print("🌟"*30 + "\n")
         
-        # 1. 强制构建真正的 Test Set 数据加载器 (phase='test')
+        # --- 下面放入您原有的最终测试逻辑 ---
+        
+        # 重新加载真实的 Test Set 数据 (如果需要)
         true_testset = dset.CompositionDataset(
-            root=os.path.join(DATA_FOLDER, args.data_dir),
-            phase='test',
+            root=os.path.join(DATA_FOLDER,args.data_dir),
+            phase='test', # 确保这里是 test
             split=args.splitname,
             subset=args.subset,
             open_world=args.open_world,
@@ -219,39 +242,34 @@ def main():
             shuffle=False,
             num_workers=args.workers
         )
-        true_evaluator = Evaluator(true_testset, model.module)
+        
+        true_evaluator = Evaluator(true_testset, model.module if args.distributed else model)
 
-        # ------------------- 评测 Best HM 模型 -------------------
+        # 加载 Best HM 权重并测试
         best_hm_path = os.path.join(logpath, 'ckpt_best_hm.t7')
         if os.path.exists(best_hm_path):
             print("\n>>> [1/2] 正在评测 【Best HM】 模型...")
-            checkpoint_hm = torch.load(best_hm_path, map_location=device)
-            model.module.load_state_dict(checkpoint_hm['net'])
-            
-            with torch.no_grad():
-                test('FINAL_BestHM', model.module, true_testloader, true_evaluator, writer, args, logpath, device)
-        else:
-            print(f"[Warning] 找不到 Best HM 模型: {best_hm_path}")
+            checkpoint_hm = torch.load(best_hm_path)
+            # 💡 注意：这里使用的是脱掉 DDP 外壳的 model (如果是分布式环境)
+            unwrapped_model = model.module if hasattr(model, 'module') else model
+            unwrapped_model.load_state_dict(checkpoint_hm['net'], strict=False) # 建议先设为 False
+            test('FINAL_BestHM', unwrapped_model, true_testloader, true_evaluator, writer, args, logpath, device)
 
-        # ------------------- 评测 Best AUC 模型 -------------------
+        # 加载 Best AUC 权重并测试
         best_auc_path = os.path.join(logpath, 'ckpt_best_auc.t7')
         if os.path.exists(best_auc_path):
             print("\n>>> [2/2] 正在评测 【Best AUC】 模型...")
-            checkpoint_auc = torch.load(best_auc_path, map_location=device)
-            model.module.load_state_dict(checkpoint_auc['net'])
+            checkpoint_auc = torch.load(best_auc_path)
+            unwrapped_model = model.module if hasattr(model, 'module') else model
+            unwrapped_model.load_state_dict(checkpoint_auc['net'], strict=False)
+            test('FINAL_BestAUC', unwrapped_model, true_testloader, true_evaluator, writer, args, logpath, device)
             
-            with torch.no_grad():
-                test('FINAL_BestAUC', model.module, true_testloader, true_evaluator, writer, args, logpath, device)
-        else:
-            print(f"[Warning] 找不到 Best AUC 模型: {best_auc_path}")
-
-        print("\n🎉 全部评测圆满完成！")
-        print("💡 请在日志最后寻找带有 'FINAL_BestHM' 和 'FINAL_BestAUC' 的两行输出，它们就是您写进论文表格的真实成绩！")
-    
-    # 确保多卡同步退出 (防止非主进程提前结束导致报错)
-    if args.distributed:
-        dist.barrier()
-    # ===============================================================
+        print("\n>>> 🎉 所有评测任务圆满完成！")
+        
+    else:
+        # 非主进程 (Rank 1, 2, 3) 在销毁进程组后直接退出程序
+        print(f"Rank {rank} 已安全退出。")
+        return
 
 
 def train_normal(epoch, args, model, trainloader, optimizer, writer, device, scaler):

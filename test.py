@@ -17,6 +17,13 @@ from tqdm import tqdm
 import os
 from os.path import join as ospj
 
+import sys
+import io
+
+# 💡 强行重定向标准输出，解决终端乱码
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # Local imports
 from data import dataset as dset
 from models.common import Evaluator

@@ -141,8 +141,8 @@ class CAILA(nn.Module):
         
         # 控制 Adapter 插入的层数 (对应论文消融实验)
         # ViT-L/14 共24层 (索引为0-23)
-        config.vision_config.adapter_start_layer = args.adapter_start_layer 
-        config.vision_config.adapter_end_layer = 23          # 固定到最后一层
+        config.vision_config.adapter_start_layer = getattr(args, 'adapter_start_layer', 0)
+        config.vision_config.adapter_end_layer = getattr(args, 'adapter_end_layer', 23)
         
         config.text_config.track_z = False
         config.text_config.adapter_modes= ['pair', 'obj','attr']

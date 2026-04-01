@@ -17,6 +17,9 @@ source activate /home/bingxing2/home/scx6d4e/run/xuanzhenzhen/Base/miniconda3/en
 
 export HF_ENDPOINT=https://hf-mirror.com
 export TOKENIZERS_PARALLELISM=false
+export PYTHONIOENCODING=utf-8
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
 
 # --- 1. 数据集软链接配置 ---
 DATA_ROOT="/home/bingxing2/home/scx6d4e/run/xuanzhenzhen/Base/data"
@@ -33,6 +36,8 @@ N_GPU=4
 ADAPTER_START_LAYER=0
 
 # 自定义单卡 Batch Size (总 Batch Size = 128 * 4 = 512)
+ADAPTER_START_LAYER=0
+ADAPTER_END_LAYER=23
 BATCH_SIZE=4
 
 echo ">>> Start Training Dual-Branch Baseline | Dataset: CGQA | Config: ${CONFIG} | Start Layer: ${ADAPTER_START_LAYER} | Batch Size: ${BATCH_SIZE} <<<"
@@ -43,4 +48,9 @@ export OMP_NUM_THREADS=1
 python -m torch.distributed.run --nproc_per_node=${N_GPU} train.py \
     --config ${CONFIG} \
     --adapter_start_layer ${ADAPTER_START_LAYER} \
-    --batch_size ${BATCH_SIZE}
+    --adapter_end_layer ${ADAPTER_END_LAYER} \
+    --adapter_start_layer ${ADAPTER_START_LAYER} \
+    --batch_size ${BATCH_SIZE} \
+    --reduction_factor 8 \
+    --concept_shift_prob 0.2 \
+    --mixup_ratio 0.2 

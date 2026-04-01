@@ -441,7 +441,8 @@ class CompositionDataset(Dataset):
 
             # Sample mixup
             p_shift = random.random()
-            do_shift = True if p_shift < self.p_shift else False
+            # 💡 强制把 self.p_shift 转换为浮点数，防止类型报错
+            do_shift = True if p_shift < float(self.p_shift) else False 
             if not do_shift:
                 p_mixup = random.random()
                 do_mixup = True if p_mixup < self.p_mixup else False
